@@ -9,7 +9,7 @@ extern "C" {
 
 typedef struct {
     char DeviceName[512];
-    char DeviceSystemPath[512];
+    char DeviceSystemPath[1024];
     char Product[512];
     char ProductDescription[512];
     char ProductID[512];

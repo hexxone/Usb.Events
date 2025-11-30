@@ -12,7 +12,7 @@
 typedef struct UsbDeviceData
 {
     char DeviceName[512];
-    char DeviceSystemPath[512];
+    char DeviceSystemPath[1024];
     char Product[512];
     char ProductDescription[512];
     char ProductID[512];
@@ -83,7 +83,8 @@ struct udev_device* GetChild(struct udev* udev, struct udev_device* parent, cons
             continue; // Skip entries that fail to create a device
         }
 
-        if (!devtype || strcmp(udev_device_get_devtype(child), devtype) == 0)
+        const char* childDevType = udev_device_get_devtype(child);
+        if (!devtype || (childDevType && strcmp(childDevType, devtype) == 0))
         {
             break;
         }
@@ -109,23 +110,25 @@ char* FindMountPoint(const char* dev_node)
         return NULL; // Check if file opening succeeded
     }
 
+    struct mntent entry;
+    char buf[4096];
     struct mntent* mount_table_entry;
     char* mount_point = NULL;
 
-    while ((mount_table_entry = getmntent(file)) != NULL)
+    while ((mount_table_entry = getmntent_r(file, &entry, buf, sizeof(buf))) != NULL)
     {
         if (mount_table_entry->mnt_fsname && 
             mount_table_entry->mnt_dir &&
-            strncmp(mount_table_entry->mnt_fsname, dev_node, strlen(mount_table_entry->mnt_fsname)) == 0)
+            strcmp(mount_table_entry->mnt_fsname, dev_node) == 0)
         {
-            mount_point = mount_table_entry->mnt_dir;
+            mount_point = strdup(mount_table_entry->mnt_dir); // Return a copy!
             break;
         }
     }
 
     endmntent(file);
 
-    return mount_point; // Return found mount point or NULL if not found
+    return mount_point; // Caller must free this!
 }
 
 void GetDeviceInfo(struct udev_device* dev)
@@ -441,18 +444,22 @@ extern "C" {
     {
         int found = 0;
 
-        if (syspath)
+        // If the watcher is not running, g_udev might be invalid/freed.
+        // Ideally, create a new udev context for this lookup if g_udev is NULL.
+        struct udev* local_udev = g_udev ? udev_ref(g_udev) : udev_new();
+
+        if (syspath && local_udev)
         {
-            struct udev_device* dev = udev_device_new_from_syspath(g_udev, syspath);
+            struct udev_device* dev = udev_device_new_from_syspath(local_udev, syspath);
             if (dev)
             {
-                struct udev_device* scsi = GetChild(g_udev, dev, "scsi", NULL);
+                struct udev_device* scsi = GetChild(local_udev, dev, "scsi", NULL);
                 if (scsi)
                 {
-                    struct udev_device* block = GetChild(g_udev, scsi, "block", "partition");
+                    struct udev_device* block = GetChild(local_udev, scsi, "block", "partition");
                     if (!block)
                     {
-                        block = GetChild(g_udev, scsi, "block", "disk");
+                        block = GetChild(local_udev, scsi, "block", "disk");
                     }
                     if (block)
                     {
@@ -464,6 +471,7 @@ extern "C" {
                             {
                                 found = 1;
                                 mountPointCallback(mount_point);
+                                free(mount_point); // Free the copy from FindMountPoint
                             }
                         }
 
@@ -476,6 +484,8 @@ extern "C" {
                 udev_device_unref(dev);
             }
         }
+
+        if (local_udev) udev_unref(local_udev);
 
         if (!found)
             mountPointCallback("");

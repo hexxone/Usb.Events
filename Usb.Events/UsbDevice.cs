@@ -9,7 +9,7 @@ namespace Usb.Events
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 512)]
         public string DeviceName;
 
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 512)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 1024)]
         public string DeviceSystemPath;
 
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 512)]

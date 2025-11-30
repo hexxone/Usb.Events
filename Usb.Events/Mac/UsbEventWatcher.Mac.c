@@ -17,11 +17,12 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct UsbDeviceData
 {
     char DeviceName[512];
-    char DeviceSystemPath[512];
+    char DeviceSystemPath[1024];
     char Product[512];
     char ProductDescription[512];
     char ProductID[512];
@@ -31,8 +32,6 @@ typedef struct UsbDeviceData
     char VendorID[512];
 } UsbDeviceData;
 
-UsbDeviceData usbDevice;
-
 static const struct UsbDeviceData empty;
 
 typedef void (*UsbDeviceCallback)(UsbDeviceData usbDevice);
@@ -40,8 +39,6 @@ UsbDeviceCallback InsertedCallback;
 UsbDeviceCallback RemovedCallback;
 
 typedef void (*MountPointCallback)(const char* mountPoint);
-
-char buffer[1024];
 
 static IONotificationPortRef notificationPort;
 
@@ -58,15 +55,15 @@ void debug_print(const char* format, ...)
 void print_cfstringref(const char* prefix, CFStringRef cfVal)
 {
 #ifdef DEBUG
-    long len = CFStringGetLength(cfVal) + 1;
-    char* cVal = malloc(len * sizeof(char));
+    if (!cfVal) return;
 
-    if (!cVal)
-    {
-        return;
-    }
+    // Correctly calculate buffer size for UTF-8
+    CFIndex len = CFStringGetMaximumSizeForEncoding(CFStringGetLength(cfVal), kCFStringEncodingUTF8) + 1;
+    char* cVal = malloc(len);
 
-    if (CFStringGetCString(cfVal, cVal, len, kCFStringEncodingASCII))
+    if (!cVal) return;
+
+    if (CFStringGetCString(cfVal, cVal, len, kCFStringEncodingUTF8))
     {
         printf("%s %s\n", prefix, cVal);
     }
@@ -89,139 +86,122 @@ void print_cfnumberref(const char* prefix, CFNumberRef cfVal)
 
 // --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-char* getMountPathByBSDName(char* bsdName)
+// Helper function to extract a mount path from a disk session
+// Returns 1 if found, 0 otherwise. Writes to outBuffer.
+int GetMountPathFromDisk(DASessionRef session, const char* bsdName, char* outBuffer, size_t outBufferSize)
 {
-    if (!bsdName)
+    if (!session || !bsdName || !outBuffer) return 0;
+
+    int found = 0;
+    DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsdName);
+    if (disk)
     {
-        return NULL;
+        CFDictionaryRef diskInfo = DADiskCopyDescription(disk);
+        if (diskInfo)
+        {
+            CFURLRef fspath = (CFURLRef)CFDictionaryGetValue(diskInfo, kDADiskDescriptionVolumePathKey);
+            if (fspath)
+            {
+                if (CFURLGetFileSystemRepresentation(fspath, false, (UInt8*)outBuffer, outBufferSize))
+                {
+                    found = 1;
+                }
+            }
+            CFRelease(diskInfo);
+        }
+        CFRelease(disk);
+    }
+    return found;
+}
+
+// Changed to accept a buffer argument instead of returning a pointer to a global static
+int getMountPathByBSDName(char* bsdName, char* outBuffer, size_t outBufferSize)
+{
+    if (!bsdName || !outBuffer)
+    {
+        return 0;
     }
 
     DASessionRef session = DASessionCreate(kCFAllocatorDefault);
     if (!session)
     {
-        return NULL;
+        return 0;
     }
 
-    char* cVal;
     int found = 0;
-    long len;
 
+    // 1. Try to find a child partition that has a mount point
     CFDictionaryRef matchingDictionary = IOBSDNameMatching(kIOMainPortDefault, 0, bsdName);
     io_iterator_t it;
+
+    // IOServiceGetMatchingServices consumes matchingDictionary
     kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, matchingDictionary, &it);
     if (kr != KERN_SUCCESS)
     {
         CFRelease(session);
-        return NULL;
+        return 0;
     }
 
     io_object_t service;
     while ((service = IOIteratorNext(it)))
     {
-        io_iterator_t children;
+        io_iterator_t children = 0;
         io_registry_entry_t child;
 
-        IORegistryEntryGetChildIterator(service, kIOServicePlane, &children);
-        while ((child = IOIteratorNext(children)))
+        if (IORegistryEntryGetChildIterator(service, kIOServicePlane, &children) == KERN_SUCCESS)
         {
-            CFStringRef bsdNameChild = (CFStringRef)IORegistryEntrySearchCFProperty(
-                child,
-                kIOServicePlane,
-                CFSTR("BSD Name"),
-                kCFAllocatorDefault,
-                kIORegistryIterateRecursively);
-
-            if (bsdNameChild)
+            while ((child = IOIteratorNext(children)))
             {
-                len = CFStringGetLength(bsdNameChild) + 1;
-                cVal = malloc(len * sizeof(char));
-                if (cVal)
+                // FIX: Object returned by IORegistryEntrySearchCFProperty MUST be released
+                CFStringRef bsdNameChild = (CFStringRef)IORegistryEntrySearchCFProperty(
+                    child,
+                    kIOServicePlane,
+                    CFSTR("BSD Name"),
+                    kCFAllocatorDefault,
+                    kIORegistryIterateRecursively);
+
+                if (bsdNameChild)
                 {
-                    if (CFStringGetCString(bsdNameChild, cVal, len, kCFStringEncodingASCII))
+                    // Dynamic buffer allocation based on encoding size
+                    CFIndex len = CFStringGetMaximumSizeForEncoding(CFStringGetLength(bsdNameChild), kCFStringEncodingUTF8)
+                        + 1;
+                    char* cVal = malloc(len);
+                    if (cVal)
                     {
-                        found = 1;
-
-                        // Copy / Paste --->
-                        DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, cVal);
-                        if (disk)
+                        if (CFStringGetCString(bsdNameChild, cVal, len, kCFStringEncodingUTF8))
                         {
-                            CFDictionaryRef diskInfo = DADiskCopyDescription(disk);
-                            if (diskInfo)
+                            if (GetMountPathFromDisk(session, cVal, outBuffer, outBufferSize))
                             {
-                                CFURLRef fspath = (CFURLRef)CFDictionaryGetValue(diskInfo, kDADiskDescriptionVolumePathKey);
-                                if (CFURLGetFileSystemRepresentation(fspath, false, (UInt8*)buffer, 1024))
-                                {
-                                    // for now, return the first found partition
-
-                                    CFRelease(diskInfo);
-                                    CFRelease(disk);
-                                    CFRelease(session);
-                                    free(cVal);
-
-                                    IOObjectRelease(child);
-                                    IOObjectRelease(children);
-                                    IOObjectRelease(service);
-                                    IOObjectRelease(it);
-
-                                    return buffer;
-                                }
-
-                                CFRelease(diskInfo);
+                                found = 1;
                             }
-
-                            CFRelease(disk);
                         }
-                        // <--- Copy / Paste
+                        free(cVal);
                     }
-
-                    free(cVal);
+                    CFRelease(bsdNameChild); // Fix Memory Leak
                 }
-            }
-            IOObjectRelease(child);
-        }
-        IOObjectRelease(children);
+                IOObjectRelease(child);
 
+                if (found) break;
+            }
+            IOObjectRelease(children);
+        }
         IOObjectRelease(service);
+
+        if (found) break;
     }
     IOObjectRelease(it);
 
-    /*
-    The device could get name 'disk1s1, or just 'disk1'.
-    In first case, the original bsd name would be 'disk1', and the child bsd name would be 'disk1s1'.
-    In second case, there would be no child bsd names, but the original one is valid for further work (obtaining various properties).
-    */
-
+    // 2. If no child is found, try the device itself
     if (!found)
     {
-        // Copy / Paste --->
-        DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsdName);
-        if (disk)
+        if (GetMountPathFromDisk(session, bsdName, outBuffer, outBufferSize))
         {
-            CFDictionaryRef diskInfo = DADiskCopyDescription(disk);
-            if (diskInfo)
-            {
-                CFURLRef fspath = (CFURLRef)CFDictionaryGetValue(diskInfo, kDADiskDescriptionVolumePathKey);
-                if (CFURLGetFileSystemRepresentation(fspath, false, (UInt8*)buffer, 1024))
-                {
-                    // for now, return the first found partition
-
-                    CFRelease(diskInfo);
-                    CFRelease(disk);
-                    CFRelease(session);
-
-                    return buffer;
-                }
-
-                CFRelease(diskInfo);
-            }
-
-            CFRelease(disk);
+            found = 1;
         }
-        // <--- Copy / Paste
     }
 
     CFRelease(session);
-    return NULL;
+    return found;
 }
 
 // --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -229,11 +209,11 @@ char* getMountPathByBSDName(char* bsdName)
 void get_usb_device_info(io_service_t device, int newdev)
 {
     io_name_t devicename;
-    io_string_t devicepath; // CHANGED: io_name_t (128 bytes) -> io_string_t (512 bytes)
+    io_string_t devicepath;
     io_name_t classname;
 
-    char* cVal;
-    long len;
+    char* c_val;
+    CFIndex len;
     int result;
 
     if (IORegistryEntryGetName(device, devicename) != KERN_SUCCESS)
@@ -242,9 +222,10 @@ void get_usb_device_info(io_service_t device, int newdev)
         return;
     }
 
-    usbDevice = empty;
+    // Use local struct instead of global to be re-entrant/thread-safe
+    UsbDeviceData usbDevice = empty;
 
-    debug_print("USB device %s: %s\n", newdev ? "FOUND" : "REMOVED", devicename);
+    debug_print("%s USB device: %s\n", newdev ? "FOUND" : "REMOVED", devicename);
 
     // Safe copy for DeviceName and other fields
     snprintf(usbDevice.DeviceName, sizeof(usbDevice.DeviceName), "%s", devicename);
@@ -261,29 +242,28 @@ void get_usb_device_info(io_service_t device, int newdev)
         debug_print("\tDevice class name: %s\n", classname);
     }
 
+    // Special case for Vendor/Product where we copy to two fields
     CFStringRef vendorname = (CFStringRef)IORegistryEntrySearchCFProperty(
-        device,
-        kIOServicePlane,
-        CFSTR("USB Vendor Name"),
-        NULL,
+        device, kIOServicePlane, CFSTR("USB Vendor Name"), NULL,
         kIORegistryIterateRecursively | kIORegistryIterateParents);
-
     if (vendorname)
     {
         print_cfstringref("\tDevice vendor name:", vendorname);
 
         len = CFStringGetLength(vendorname) + 1;
-        cVal = malloc(len * sizeof(char));
-        if (cVal)
+        c_val = malloc(len * sizeof(char));
+        if (c_val)
         {
-            if (CFStringGetCString(vendorname, cVal, len, kCFStringEncodingASCII))
+            // CHANGED: ASCII -> UTF8
+            if (CFStringGetCString(vendorname, c_val, len, kCFStringEncodingUTF8))
             {
-                snprintf(usbDevice.Vendor, sizeof(usbDevice.Vendor), "%s", cVal);
-                snprintf(usbDevice.VendorDescription, sizeof(usbDevice.VendorDescription), "%s", cVal);
+                snprintf(usbDevice.Vendor, sizeof(usbDevice.Vendor), "%s", c_val);
+                snprintf(usbDevice.VendorDescription, sizeof(usbDevice.VendorDescription), "%s", c_val);
             }
 
-            free(cVal);
+            free(c_val);
         }
+        CFRelease(vendorname); // ADDED: Fix Memory Leak
     }
 
     CFNumberRef vendorId = (CFNumberRef)IORegistryEntrySearchCFProperty(
@@ -296,11 +276,11 @@ void get_usb_device_info(io_service_t device, int newdev)
     if (vendorId)
     {
         print_cfnumberref("\tVendor id:", vendorId);
-
         if (CFNumberGetValue(vendorId, kCFNumberSInt32Type, &result))
         {
-            sprintf(usbDevice.VendorID, "%d", result);
+            snprintf(usbDevice.VendorID, sizeof(usbDevice.VendorID), "%d", result);
         }
+        CFRelease(vendorId); // Fix Memory Leak
     }
 
     CFStringRef productname = (CFStringRef)IORegistryEntrySearchCFProperty(
@@ -315,17 +295,19 @@ void get_usb_device_info(io_service_t device, int newdev)
         print_cfstringref("\tDevice product name:", productname);
 
         len = CFStringGetLength(productname) + 1;
-        cVal = malloc(len * sizeof(char));
-        if (cVal)
+        c_val = malloc(len * sizeof(char));
+        if (c_val)
         {
-            if (CFStringGetCString(productname, cVal, len, kCFStringEncodingASCII))
+            // CHANGED: ASCII -> UTF8
+            if (CFStringGetCString(productname, c_val, len, kCFStringEncodingUTF8))
             {
-                snprintf(usbDevice.Product, sizeof(usbDevice.Product), "%s", cVal);
-                snprintf(usbDevice.ProductDescription, sizeof(usbDevice.ProductDescription), "%s", cVal);
+                snprintf(usbDevice.Product, sizeof(usbDevice.Product), "%s", c_val);
+                snprintf(usbDevice.ProductDescription, sizeof(usbDevice.ProductDescription), "%s", c_val);
             }
 
-            free(cVal);
+            free(c_val);
         }
+        CFRelease(productname); // ADDED: Fix Memory Leak
     }
 
     CFNumberRef productId = (CFNumberRef)IORegistryEntrySearchCFProperty(
@@ -338,11 +320,11 @@ void get_usb_device_info(io_service_t device, int newdev)
     if (productId)
     {
         print_cfnumberref("\tProduct id:", productId);
-
         if (CFNumberGetValue(productId, kCFNumberSInt32Type, &result))
         {
-            sprintf(usbDevice.ProductID, "%d", result);
+            snprintf(usbDevice.ProductID, sizeof(usbDevice.ProductID), "%d", result);
         }
+        CFRelease(productId); // Fix Memory Leak
     }
 
     CFStringRef serialnumber = (CFStringRef)IORegistryEntrySearchCFProperty(
@@ -357,16 +339,18 @@ void get_usb_device_info(io_service_t device, int newdev)
         print_cfstringref("\tDevice serial number:", serialnumber);
 
         len = CFStringGetLength(serialnumber) + 1;
-        cVal = malloc(len * sizeof(char));
-        if (cVal)
+        c_val = malloc(len * sizeof(char));
+        if (c_val)
         {
-            if (CFStringGetCString(serialnumber, cVal, len, kCFStringEncodingASCII))
+            // CHANGED: ASCII -> UTF8
+            if (CFStringGetCString(serialnumber, c_val, len, kCFStringEncodingUTF8))
             {
-                snprintf(usbDevice.SerialNumber, sizeof(usbDevice.SerialNumber), "%s", cVal);
+                snprintf(usbDevice.SerialNumber, sizeof(usbDevice.SerialNumber), "%s", c_val);
             }
 
-            free(cVal);
+            free(c_val);
         }
+        CFRelease(serialnumber); // ADDED: Fix Memory Leak
     }
 
     debug_print("\n");
@@ -473,14 +457,16 @@ void configure_and_start_notifier(void)
 
     if (!matchDictAdded)
     {
-        fprintf(stderr, "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOMatchedNotification)\n");
+        fprintf(stderr,
+                "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOMatchedNotification)\n");
         return;
     }
 
     kern_return_t addResult;
 
     io_iterator_t deviceAddedIter;
-    addResult = IOServiceAddMatchingNotification(notificationPort, kIOMatchedNotification, matchDictAdded, usb_device_added, NULL, &deviceAddedIter);
+    addResult = IOServiceAddMatchingNotification(notificationPort, kIOMatchedNotification, matchDictAdded,
+                                                 usb_device_added, NULL, &deviceAddedIter);
 
     if (addResult != KERN_SUCCESS)
     {
@@ -496,12 +482,14 @@ void configure_and_start_notifier(void)
 
     if (!matchDictRemoved)
     {
-        fprintf(stderr, "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOTerminatedNotification)\n");
+        fprintf(stderr,
+                "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOTerminatedNotification)\n");
         return;
     }
 
     io_iterator_t deviceRemovedIter;
-    addResult = IOServiceAddMatchingNotification(notificationPort, kIOTerminatedNotification, matchDictRemoved, usb_device_removed, NULL, &deviceRemovedIter);
+    addResult = IOServiceAddMatchingNotification(notificationPort, kIOTerminatedNotification, matchDictRemoved,
+                                                 usb_device_removed, NULL, &deviceRemovedIter);
 
     if (addResult != KERN_SUCCESS)
     {
@@ -547,7 +535,11 @@ void init_signal_handler(void)
 }
 
 #ifdef __cplusplus
+
 extern "C" {
+
+
+
 #endif
 
 void StartMacWatcher(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback)
@@ -592,8 +584,8 @@ void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback
     CFDictionaryAddValue(matchingDictionary, CFSTR(kUSBInterfaceClass), cfValue);
     CFRelease(cfValue);
 
-    // NOTE: if you will specify only device class and will not specify subclass, it will return an empty iterator, and I don't know how to say that we need any subclass. 
-    // BUT: all the devices I've check had kUSBMassStorageSCSISubClass
+    // NOTE: if you will specify only a device class and will not specify a subclass, it will return an empty iterator, and I don't know how to say that we need any subclass. 
+    // BUT: all the devices I've checked had kUSBMassStorageSCSISubClass
     SInt32 deviceSubClassNum = kUSBMassStorageSCSISubClass;
     cfValue = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &deviceSubClassNum);
     CFDictionaryAddValue(matchingDictionary, CFSTR(kUSBInterfaceSubClass), cfValue);
@@ -603,15 +595,13 @@ void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback
     io_service_t usbInterface;
     IOServiceGetMatchingServices(kIOMainPortDefault, matchingDictionary, &foundIterator);
 
-    char* cVal;
     int found = 0;
-    long len;
     int match = 0;
-    io_string_t devicepath;
 
     // iterate through USB mass storage devices
     while ((usbInterface = IOIteratorNext(foundIterator)))
     {
+        io_string_t devicepath;
         if (IORegistryEntryGetPath(usbInterface, kIOServicePlane, devicepath) == KERN_SUCCESS)
         {
             if (strncmp(devicepath, syspath, strlen(syspath)) == 0)
@@ -625,23 +615,23 @@ void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback
 
                 if (bsdName)
                 {
-                    len = CFStringGetLength(bsdName) + 1;
-                    cVal = malloc(len * sizeof(char));
-                    if (cVal)
+                    long len = CFStringGetMaximumSizeForEncoding(CFStringGetLength(bsdName), kCFStringEncodingUTF8) +
+                        1;
+                    char* c_val = malloc(len);
+                    if (c_val)
                     {
-                        if (CFStringGetCString(bsdName, cVal, len, kCFStringEncodingASCII))
+                        if (CFStringGetCString(bsdName, c_val, len, kCFStringEncodingUTF8))
                         {
-                            char* mountPath = getMountPathByBSDName(cVal);
-
-                            if (mountPath)
+                            char mountPathBuffer[1024];
+                            if (getMountPathByBSDName(c_val, mountPathBuffer, sizeof(mountPathBuffer)))
                             {
                                 found = 1;
-                                mountPointCallback(mountPath);
+                                mountPointCallback(mountPathBuffer);
                             }
                         }
-
-                        free(cVal);
+                        free(c_val);
                     }
+                    CFRelease(bsdName); // Fix Memory Leak
                 }
 
                 match = 1;
