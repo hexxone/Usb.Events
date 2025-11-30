@@ -32,15 +32,27 @@ typedef struct UsbDeviceData
     char VendorID[512];
 } UsbDeviceData;
 
-static const struct UsbDeviceData empty;
+// REMOVED: static const struct UsbDeviceData empty; -> We can initialize directly {0}
 
-typedef void (*UsbDeviceCallback)(UsbDeviceData usbDevice);
-UsbDeviceCallback InsertedCallback;
-UsbDeviceCallback RemovedCallback;
+// REMOVED: Global callback variables
+// UsbDeviceCallback InsertedCallback;
+// UsbDeviceCallback RemovedCallback;
+// static IONotificationPortRef notificationPort;
+// CFRunLoopSourceRef stopRunLoopSource = NULL;
+// CFRunLoopRef runLoop;
 
+typedef void (*UsbDeviceCallback)(UsbDeviceData* usbDevice);
 typedef void (*MountPointCallback)(const char* mountPoint);
 
-static IONotificationPortRef notificationPort;
+// ADDED: Context struct to hold state
+typedef struct WatcherContext {
+    UsbDeviceCallback InsertedCallback;
+    UsbDeviceCallback RemovedCallback;
+    IONotificationPortRef notificationPort;
+    CFRunLoopRef runLoop;
+    CFRunLoopSourceRef stopSource;
+} WatcherContext;
+
 
 void debug_print(const char* format, ...)
 {
@@ -206,7 +218,8 @@ int getMountPathByBSDName(char* bsdName, char* outBuffer, size_t outBufferSize)
 
 // --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-void get_usb_device_info(io_service_t device, int newdev)
+// CHANGED: Added context parameter to get access to callbacks
+void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
 {
     io_name_t devicename;
     io_string_t devicepath;
@@ -222,8 +235,9 @@ void get_usb_device_info(io_service_t device, int newdev)
         return;
     }
 
-    // Use local struct instead of global to be re-entrant/thread-safe
-    UsbDeviceData usbDevice = empty;
+    // Initialize struct with zeros
+    UsbDeviceData usbDevice;
+    memset(&usbDevice, 0, sizeof(UsbDeviceData));
 
     debug_print("%s USB device: %s\n", newdev ? "FOUND" : "REMOVED", devicename);
 
@@ -357,174 +371,182 @@ void get_usb_device_info(io_service_t device, int newdev)
 
     if (newdev)
     {
-        InsertedCallback(usbDevice);
+        if (ctx && ctx->InsertedCallback)
+            ctx->InsertedCallback(&usbDevice); // Pass by pointer
     }
     else
     {
-        RemovedCallback(usbDevice);
+        if (ctx && ctx->RemovedCallback)
+            ctx->RemovedCallback(&usbDevice); // Pass by pointer
     }
 }
 
-void iterate_usb_devices(io_iterator_t iterator, int newdev)
+// CHANGED: Pass context through
+void iterate_usb_devices(io_iterator_t iterator, int newdev, WatcherContext* ctx)
 {
     io_service_t usbDevice;
 
     while ((usbDevice = IOIteratorNext(iterator)))
     {
-        get_usb_device_info(usbDevice, newdev);
+        get_usb_device_info(usbDevice, newdev, ctx);
         IOObjectRelease(usbDevice);
     }
 }
 
+// CHANGED: Cast refcon to WatcherContext
 void usb_device_added(void* refcon, io_iterator_t iterator)
 {
-    iterate_usb_devices(iterator, 1);
+    iterate_usb_devices(iterator, 1, (WatcherContext*)refcon);
 }
 
+// CHANGED: Cast refcon to WatcherContext
 void usb_device_removed(void* refcon, io_iterator_t iterator)
 {
-    iterate_usb_devices(iterator, 0);
+    iterate_usb_devices(iterator, 0, (WatcherContext*)refcon);
 }
 
 // Global variable to hold the run loop source
-CFRunLoopSourceRef stopRunLoopSource = NULL;
-
-CFRunLoopRef runLoop;
+// CFRunLoopSourceRef stopRunLoopSource = NULL;
+//
+// CFRunLoopRef runLoop;
 
 // Callback function for the run loop source
 void stopRunLoopSourceCallback(void* info)
 {
-    // Stop the run loop when the source is triggered
-    CFRunLoopStop(runLoop);
-}
-
-// Function to add the stop run loop source
-void addStopRunLoopSource(void)
-{
-    // Create a custom context for the run loop source
-    CFRunLoopSourceContext sourceContext = {
-        .version = 0,
-        .info = NULL,
-        .retain = NULL,
-        .release = NULL,
-        .copyDescription = NULL,
-        .equal = NULL,
-        .hash = NULL,
-        .schedule = NULL,
-        .cancel = NULL,
-        .perform = stopRunLoopSourceCallback
-    };
-
-    // Create the run loop source
-    stopRunLoopSource = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &sourceContext);
-
-    // Add the run loop source to the current run loop
-    CFRunLoopAddSource(runLoop, stopRunLoopSource, kCFRunLoopDefaultMode);
-}
-
-// Function to remove the stop run loop source
-void removeStopRunLoopSource(void)
-{
-    if (stopRunLoopSource != NULL)
+    WatcherContext* ctx = (WatcherContext*)info;
+    if (ctx && ctx->runLoop)
     {
-        // Remove the run loop source from the current run loop
-        CFRunLoopRemoveSource(runLoop, stopRunLoopSource, kCFRunLoopDefaultMode);
-
-        // Release the run loop source
-        CFRelease(stopRunLoopSource);
-        stopRunLoopSource = NULL;
+        CFRunLoopStop(ctx->runLoop);
     }
 }
 
-void init_notifier(void)
-{
-    notificationPort = IONotificationPortCreate(kIOMainPortDefault);
-    CFRunLoopAddSource(runLoop, IONotificationPortGetRunLoopSource(notificationPort), kCFRunLoopDefaultMode);
+// Function to add the stop run loop source
+// void addStopRunLoopSource(void)
+// {
+//     // Create a custom context for the run loop source
+//     CFRunLoopSourceContext sourceContext = {
+//         .version = 0,
+//         .info = NULL,
+//         .retain = NULL,
+//         .release = NULL,
+//         .copyDescription = NULL,
+//         .equal = NULL,
+//         .hash = NULL,
+//         .schedule = NULL,
+//         .cancel = NULL,
+//         .perform = stopRunLoopSourceCallback
+//     };
+//
+//     // Create the run loop source
+//     stopRunLoopSource = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &sourceContext);
+//
+//     // Add the run loop source to the current run loop
+//     CFRunLoopAddSource(runLoop, stopRunLoopSource, kCFRunLoopDefaultMode);
+// }
 
-    debug_print("init_notifier ok\n");
-}
+// Function to remove the stop run loop source
+// void removeStopRunLoopSource(void)
+// {
+//     if (stopRunLoopSource != NULL)
+//     {
+//         // Remove the run loop source from the current run loop
+//         CFRunLoopRemoveSource(runLoop, stopRunLoopSource, kCFRunLoopDefaultMode);
+//
+//         // Release the run loop source
+//         CFRelease(stopRunLoopSource);
+//         stopRunLoopSource = NULL;
+//     }
+// }
+
+// void init_notifier(void)
+// {
+//     notificationPort = IONotificationPortCreate(kIOMainPortDefault);
+//     CFRunLoopAddSource(runLoop, IONotificationPortGetRunLoopSource(notificationPort), kCFRunLoopDefaultMode);
+//
+//     debug_print("init_notifier ok\n");
+// }
 
 // https://sudonull.com/post/141779-Working-with-USB-devices-in-a-C-program-on-MacOS-X
 
 // If a function has Create or Copy in its name, you own the returned object and must CFRelease it when done.
 // Otherwise, you do not own it and must not release it. If you do, you will get CF_IS_OBJC exception.
 
-void configure_and_start_notifier(void)
-{
-    debug_print("Starting notifier\n");
+// void configure_and_start_notifier(void)
+// {
+//     debug_print("Starting notifier\n");
+//
+//     CFMutableDictionaryRef matchDictAdded = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
+//
+//     if (!matchDictAdded)
+//     {
+//         fprintf(stderr,
+//                 "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOMatchedNotification)\n");
+//         return;
+//     }
+//
+//     kern_return_t addResult;
+//
+//     io_iterator_t deviceAddedIter;
+//     addResult = IOServiceAddMatchingNotification(notificationPort, kIOMatchedNotification, matchDictAdded,
+//                                                  usb_device_added, NULL, &deviceAddedIter);
+//
+//     if (addResult != KERN_SUCCESS)
+//     {
+//         fprintf(stderr, "IOServiceAddMatchingNotification failed for kIOMatchedNotification\n");
+//         //CFRelease(matchDict); - CF_IS_OBJC exception
+//         return;
+//     }
+//
+//     usb_device_added(NULL, deviceAddedIter);
+//
+//     // CHANGED: Create a NEW dictionary for Removed events (DO NOT REUSE matchDict)
+//     CFMutableDictionaryRef matchDictRemoved = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
+//
+//     if (!matchDictRemoved)
+//     {
+//         fprintf(stderr,
+//                 "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOTerminatedNotification)\n");
+//         return;
+//     }
+//
+//     io_iterator_t deviceRemovedIter;
+//     addResult = IOServiceAddMatchingNotification(notificationPort, kIOTerminatedNotification, matchDictRemoved,
+//                                                  usb_device_removed, NULL, &deviceRemovedIter);
+//
+//     if (addResult != KERN_SUCCESS)
+//     {
+//         fprintf(stderr, "IOServiceAddMatchingNotification failed for kIOTerminatedNotification\n");
+//         //CFRelease(matchDict); - CF_IS_OBJC exception
+//         return;
+//     }
+//
+//     usb_device_removed(NULL, deviceRemovedIter);
+//
+//     // Add the stop run loop source
+//     addStopRunLoopSource();
+//
+//     // Start the run loop
+//     CFRunLoopRun();
+//
+//     // Remove the stop run loop source
+//     removeStopRunLoopSource();
+//
+//     //CFRelease(matchDict); - CF_IS_OBJC exception
+// }
 
-    CFMutableDictionaryRef matchDictAdded = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
-
-    if (!matchDictAdded)
-    {
-        fprintf(stderr,
-                "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOMatchedNotification)\n");
-        return;
-    }
-
-    kern_return_t addResult;
-
-    io_iterator_t deviceAddedIter;
-    addResult = IOServiceAddMatchingNotification(notificationPort, kIOMatchedNotification, matchDictAdded,
-                                                 usb_device_added, NULL, &deviceAddedIter);
-
-    if (addResult != KERN_SUCCESS)
-    {
-        fprintf(stderr, "IOServiceAddMatchingNotification failed for kIOMatchedNotification\n");
-        //CFRelease(matchDict); - CF_IS_OBJC exception
-        return;
-    }
-
-    usb_device_added(NULL, deviceAddedIter);
-
-    // CHANGED: Create a NEW dictionary for Removed events (DO NOT REUSE matchDict)
-    CFMutableDictionaryRef matchDictRemoved = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
-
-    if (!matchDictRemoved)
-    {
-        fprintf(stderr,
-                "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOTerminatedNotification)\n");
-        return;
-    }
-
-    io_iterator_t deviceRemovedIter;
-    addResult = IOServiceAddMatchingNotification(notificationPort, kIOTerminatedNotification, matchDictRemoved,
-                                                 usb_device_removed, NULL, &deviceRemovedIter);
-
-    if (addResult != KERN_SUCCESS)
-    {
-        fprintf(stderr, "IOServiceAddMatchingNotification failed for kIOTerminatedNotification\n");
-        //CFRelease(matchDict); - CF_IS_OBJC exception
-        return;
-    }
-
-    usb_device_removed(NULL, deviceRemovedIter);
-
-    // Add the stop run loop source
-    addStopRunLoopSource();
-
-    // Start the run loop
-    CFRunLoopRun();
-
-    // Remove the stop run loop source
-    removeStopRunLoopSource();
-
-    //CFRelease(matchDict); - CF_IS_OBJC exception
-}
-
-void deinit_notifier(void)
-{
-    CFRunLoopRemoveSource(runLoop, IONotificationPortGetRunLoopSource(notificationPort), kCFRunLoopDefaultMode);
-    IONotificationPortDestroy(notificationPort);
-
-    debug_print("deinit_notifier ok\n");
-}
+// void deinit_notifier(void)
+// {
+//     CFRunLoopRemoveSource(runLoop, IONotificationPortGetRunLoopSource(notificationPort), kCFRunLoopDefaultMode);
+//     IONotificationPortDestroy(notificationPort);
+//
+//     debug_print("deinit_notifier ok\n");
+// }
 
 void signal_handler(int signum)
 {
     debug_print("\ngot signal, signnum=%i  stopping current RunLoop\n", signum);
 
-    CFRunLoopStop(runLoop);
+    // CFRunLoopStop(runLoop);
 }
 
 void init_signal_handler(void)
@@ -534,38 +556,105 @@ void init_signal_handler(void)
     signal(SIGTERM, signal_handler);
 }
 
-#ifdef __cplusplus
+// ----------------------------------------------------------------------------------
+// NEW API IMPLEMENTATION
+// ----------------------------------------------------------------------------------
 
-extern "C" {
-
-
-
-#endif
-
-void StartMacWatcher(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback)
+void* CreateMacWatcherContext(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback)
 {
-    InsertedCallback = insertedCallback;
-    RemovedCallback = removedCallback;
-
-    runLoop = CFRunLoopGetCurrent();
-
-    //init_signal_handler();
-    init_notifier();
-    configure_and_start_notifier();
-    deinit_notifier();
+    WatcherContext* ctx = (WatcherContext*)malloc(sizeof(WatcherContext));
+    if (ctx)
+    {
+        memset(ctx, 0, sizeof(WatcherContext));
+        ctx->InsertedCallback = insertedCallback;
+        ctx->RemovedCallback = removedCallback;
+    }
+    return ctx;
 }
 
-void StopMacWatcher(void)
+void ReleaseMacWatcherContext(void* ptr)
 {
-    if (stopRunLoopSource != NULL)
-    {
-        // Signal the run loop source to stop the run loop
-        CFRunLoopSourceSignal(stopRunLoopSource);
+    if (ptr) free(ptr);
+}
 
-        // Wake up the run loop to process the signal immediately
-        CFRunLoopWakeUp(runLoop);
+void RunMacWatcher(void* ptr)
+{
+    WatcherContext* ctx = (WatcherContext*)ptr;
+    if (!ctx) return;
+
+    ctx->runLoop = CFRunLoopGetCurrent();
+
+    // 1. Init Notifier
+    ctx->notificationPort = IONotificationPortCreate(kIOMainPortDefault);
+    CFRunLoopAddSource(ctx->runLoop, IONotificationPortGetRunLoopSource(ctx->notificationPort), kCFRunLoopDefaultMode);
+
+    // 2. Configure Notifier
+    // Note: IOServiceAddMatchingNotification takes 'refCon' as 5th argument. We pass 'ctx'.
+    
+    CFMutableDictionaryRef matchDictAdded = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
+    if (matchDictAdded)
+    {
+        io_iterator_t deviceAddedIter;
+        kern_return_t res = IOServiceAddMatchingNotification(ctx->notificationPort, kIOMatchedNotification, matchDictAdded,
+                                                 usb_device_added, ctx, &deviceAddedIter);
+        if (res == KERN_SUCCESS)
+        {
+            usb_device_added(ctx, deviceAddedIter);
+        }
+    }
+
+    CFMutableDictionaryRef matchDictRemoved = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
+    if (matchDictRemoved)
+    {
+        io_iterator_t deviceRemovedIter;
+        kern_return_t res = IOServiceAddMatchingNotification(ctx->notificationPort, kIOTerminatedNotification, matchDictRemoved,
+                                                 usb_device_removed, ctx, &deviceRemovedIter);
+        if (res == KERN_SUCCESS)
+        {
+            usb_device_removed(ctx, deviceRemovedIter);
+        }
+    }
+
+    // 3. Add Stop Source
+    CFRunLoopSourceContext sourceContext = {
+        .version = 0,
+        .info = ctx,
+        .perform = stopRunLoopSourceCallback
+    };
+    ctx->stopSource = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &sourceContext);
+    CFRunLoopAddSource(ctx->runLoop, ctx->stopSource, kCFRunLoopDefaultMode);
+
+    // 4. Run
+    CFRunLoopRun();
+
+    // 5. Cleanup after stop
+    if (ctx->stopSource)
+    {
+        CFRunLoopRemoveSource(ctx->runLoop, ctx->stopSource, kCFRunLoopDefaultMode);
+        CFRelease(ctx->stopSource);
+        ctx->stopSource = NULL;
+    }
+    
+    if (ctx->notificationPort)
+    {
+        CFRunLoopRemoveSource(ctx->runLoop, IONotificationPortGetRunLoopSource(ctx->notificationPort), kCFRunLoopDefaultMode);
+        IONotificationPortDestroy(ctx->notificationPort);
+        ctx->notificationPort = NULL;
     }
 }
+
+void StopMacWatcher(void* ptr)
+{
+    WatcherContext* ctx = (WatcherContext*)ptr;
+    if (ctx && ctx->stopSource && ctx->runLoop)
+    {
+        CFRunLoopSourceSignal(ctx->stopSource);
+        CFRunLoopWakeUp(ctx->runLoop);
+    }
+}
+
+// REMOVED: Old Init/Start/Stop functions as they are replaced by the Context aware ones above
+// init_notifier, configure_and_start_notifier, deinit_notifier, StartMacWatcher, StopMacWatcher...
 
 void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback)
 {

@@ -3,11 +3,14 @@
 
 #ifdef __cplusplus
 extern "C" {
+
+
 #endif
 
 // Structures
 
-typedef struct {
+typedef struct
+{
     char DeviceName[512];
     char DeviceSystemPath[1024];
     char Product[512];
@@ -19,18 +22,17 @@ typedef struct {
     char VendorID[512];
 } UsbDeviceData;
 
-// Function Pointers
-
-typedef void (*UsbDeviceCallback)(UsbDeviceData usbDevice);
+typedef void (*UsbDeviceCallback)(const UsbDeviceData* usbDevice);
 typedef void (*MountPointCallback)(const char* mountPoint);
 
-// macOS Functions
+// Functions
+
+void* CreateMacWatcherContext(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback);
+void RunMacWatcher(void* ctx);
+void StopMacWatcher(void* ctx);
+void ReleaseMacWatcherContext(void* ctx);
 
 void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback);
-
-void StartMacWatcher(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback);
-
-void StopMacWatcher(void);
 
 #ifdef __cplusplus
 }

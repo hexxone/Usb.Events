@@ -112,7 +112,16 @@ namespace Usb.Events
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             {
-                _watcherTask = Task.Run(() => StartMacWatcher(InsertedCallback, RemovedCallback));
+                // CHANGED: Explicitly create delegates and store them in fields
+                _insertedCallbackDelegate = InsertedCallback;
+                _removedCallbackDelegate = RemovedCallback;
+                _macWatcherContext = CreateMacWatcherContext(_insertedCallbackDelegate, _removedCallbackDelegate);
+                
+                _watcherTask = Task.Run(() => 
+                {
+                    if (_macWatcherContext != IntPtr.Zero)
+                        RunMacWatcher(_macWatcherContext);
+                });
 
                 _cancellationTokenSource = new CancellationTokenSource();
 
@@ -224,25 +233,32 @@ namespace Usb.Events
 
         #region Linux and Mac methods
 
+        // CHANGED: Use 'ref' to match pointer passing (Pass-by-Reference)
         [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Auto)]
-        delegate void UsbDeviceCallback(UsbDeviceData usbDevice);
+        delegate void UsbDeviceCallback(ref UsbDeviceData usbDevice);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Auto)]
         delegate void MountPointCallback(string mountPoint);
 
-        private void InsertedCallback(UsbDeviceData usbDevice)
+        // ADDED: Field to hold the unmanaged context and to keep delegates alive (prevent GC collection)
+        private IntPtr _macWatcherContext = IntPtr.Zero;
+        private UsbDeviceCallback? _insertedCallbackDelegate;
+        private UsbDeviceCallback? _removedCallbackDelegate;
+
+        private void InsertedCallback(ref UsbDeviceData usbDevice)
         {
-            if (UsbDeviceList.Any(device => device.DeviceName == usbDevice.DeviceName && device.DeviceSystemPath == usbDevice.DeviceSystemPath))
+            var data = usbDevice;
+            if (UsbDeviceList.Any(device => device.DeviceName == data.DeviceName && device.DeviceSystemPath == data.DeviceSystemPath))
                 return;
 
-            OnDeviceInserted(new UsbDevice(usbDevice));
+            OnDeviceInserted(new UsbDevice(data));
         }
 
-        private void RemovedCallback(UsbDeviceData usbDevice)
+        private void RemovedCallback(ref UsbDeviceData usbDevice)
         {
             OnDeviceRemoved(new UsbDevice(usbDevice));
         }
-
+        
         [DllImport("UsbEventWatcher.Linux.so", CallingConvention = CallingConvention.Cdecl)]
         static extern void GetLinuxMountPoint(string syspath, MountPointCallback mountPointCallback);
 
@@ -251,52 +267,26 @@ namespace Usb.Events
 
         [DllImport("UsbEventWatcher.Linux.so", CallingConvention = CallingConvention.Cdecl)]
         static extern void StopLinuxWatcher();
-
+        
+        
         [DllImport("UsbEventWatcher.Mac.dylib", CallingConvention = CallingConvention.Cdecl)]
         static extern void GetMacMountPoint(string syspath, MountPointCallback mountPointCallback);
 
         [DllImport("UsbEventWatcher.Mac.dylib", CallingConvention = CallingConvention.Cdecl)]
-        static extern void StartMacWatcher(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback);
+        static extern IntPtr CreateMacWatcherContext(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback);
 
         [DllImport("UsbEventWatcher.Mac.dylib", CallingConvention = CallingConvention.Cdecl)]
-        static extern void StopMacWatcher();
+        static extern void RunMacWatcher(IntPtr ctx);
+
+        [DllImport("UsbEventWatcher.Mac.dylib", CallingConvention = CallingConvention.Cdecl)]
+        static extern void StopMacWatcher(IntPtr ctx);
+
+        [DllImport("UsbEventWatcher.Mac.dylib", CallingConvention = CallingConvention.Cdecl)]
+        static extern void ReleaseMacWatcherContext(IntPtr ctx);
 
         #endregion
 
-        /*
-        Product: DT_101_II
-        Product Description: DataTraveler 101 II
-        Product ID: 1625
-        Serial Number: 0019E06B9C85F9A0F7550C20
-        Vendor: Kingston
-        Vendor Description: Kingston Technology
-        Vendor ID: 0951
-
-        Product: DataTraveler_2.0
-        Product Description: Kingston DataTraveler 102/2.0 / HEMA Flash Drive 2 GB / PNY Attache 4GB Stick
-        Product ID: 6545
-        Serial Number: 6CF049E0FBE3B0A069B24172
-        Vendor: Kingston
-        Vendor Description: Toshiba Corp.
-        Vendor ID: 0930
-
-        Product: Mass_Storage_Device
-        Product Description: JetFlash
-        Product ID: 1000
-        Serial Number: 08ZLSF32M9ZNUJRJ
-        Vendor: JetFlash
-        Vendor Description: Transcend Information, Inc.
-        Vendor ID: 8564
-
-        Product: USB_Flash_Memory
-        Product Description: Kingston DataTraveler 102/2.0 / HEMA Flash Drive 2 GB / PNY Attache 4GB Stick
-        Product ID: 6545
-        Serial Number: 0BB1B8700301387D
-        Vendor: 0930
-        Vendor Description: Toshiba Corp.
-        Vendor ID: 0930
-        /**/
-
+        
         #region Windows methods
 
         private void AddAlreadyPresentDevicesToList()
@@ -814,7 +804,19 @@ namespace Usb.Events
                 _cancellationTokenSource?.Dispose();
                 _cancellationTokenSource = null;
 
-                StopMacWatcher();
+                if (_macWatcherContext != IntPtr.Zero)
+                {
+                    StopMacWatcher(_macWatcherContext);
+                        
+                    // Wait for task to finish to ensure RunLoop has exited before freeing memory
+                    if (_watcherTask != null && !_watcherTask.IsCompleted)
+                    {
+                        _watcherTask.Wait(1000);
+                    }
+
+                    ReleaseMacWatcherContext(_macWatcherContext);
+                    _macWatcherContext = IntPtr.Zero;
+                }
 
                 if (_watcherTask != null && !_watcherTask.IsCompleted)
                 {
