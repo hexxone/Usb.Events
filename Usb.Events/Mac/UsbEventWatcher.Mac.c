@@ -32,19 +32,10 @@ typedef struct UsbDeviceData
     char VendorID[512];
 } UsbDeviceData;
 
-// REMOVED: static const struct UsbDeviceData empty; -> We can initialize directly {0}
-
-// REMOVED: Global callback variables
-// UsbDeviceCallback InsertedCallback;
-// UsbDeviceCallback RemovedCallback;
-// static IONotificationPortRef notificationPort;
-// CFRunLoopSourceRef stopRunLoopSource = NULL;
-// CFRunLoopRef runLoop;
-
 typedef void (*UsbDeviceCallback)(UsbDeviceData* usbDevice);
 typedef void (*MountPointCallback)(const char* mountPoint);
 
-// ADDED: Context struct to hold state
+// Context struct to hold state
 typedef struct WatcherContext {
     UsbDeviceCallback InsertedCallback;
     UsbDeviceCallback RemovedCallback;
@@ -189,7 +180,7 @@ int getMountPathByBSDName(char* bsdName, char* outBuffer, size_t outBufferSize)
                         }
                         free(cVal);
                     }
-                    CFRelease(bsdNameChild); // Fix Memory Leak
+                    CFRelease(bsdNameChild);
                 }
                 IOObjectRelease(child);
 
@@ -218,7 +209,6 @@ int getMountPathByBSDName(char* bsdName, char* outBuffer, size_t outBufferSize)
 
 // --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// CHANGED: Added context parameter to get access to callbacks
 void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
 {
     io_name_t devicename;
@@ -268,7 +258,6 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
         c_val = malloc(len * sizeof(char));
         if (c_val)
         {
-            // CHANGED: ASCII -> UTF8
             if (CFStringGetCString(vendorname, c_val, len, kCFStringEncodingUTF8))
             {
                 snprintf(usbDevice.Vendor, sizeof(usbDevice.Vendor), "%s", c_val);
@@ -277,7 +266,7 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
 
             free(c_val);
         }
-        CFRelease(vendorname); // ADDED: Fix Memory Leak
+        CFRelease(vendorname);
     }
 
     CFNumberRef vendorId = (CFNumberRef)IORegistryEntrySearchCFProperty(
@@ -294,7 +283,7 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
         {
             snprintf(usbDevice.VendorID, sizeof(usbDevice.VendorID), "%d", result);
         }
-        CFRelease(vendorId); // Fix Memory Leak
+        CFRelease(vendorId);
     }
 
     CFStringRef productname = (CFStringRef)IORegistryEntrySearchCFProperty(
@@ -312,7 +301,6 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
         c_val = malloc(len * sizeof(char));
         if (c_val)
         {
-            // CHANGED: ASCII -> UTF8
             if (CFStringGetCString(productname, c_val, len, kCFStringEncodingUTF8))
             {
                 snprintf(usbDevice.Product, sizeof(usbDevice.Product), "%s", c_val);
@@ -321,7 +309,7 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
 
             free(c_val);
         }
-        CFRelease(productname); // ADDED: Fix Memory Leak
+        CFRelease(productname);
     }
 
     CFNumberRef productId = (CFNumberRef)IORegistryEntrySearchCFProperty(
@@ -338,7 +326,7 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
         {
             snprintf(usbDevice.ProductID, sizeof(usbDevice.ProductID), "%d", result);
         }
-        CFRelease(productId); // Fix Memory Leak
+        CFRelease(productId);
     }
 
     CFStringRef serialnumber = (CFStringRef)IORegistryEntrySearchCFProperty(
@@ -356,7 +344,6 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
         c_val = malloc(len * sizeof(char));
         if (c_val)
         {
-            // CHANGED: ASCII -> UTF8
             if (CFStringGetCString(serialnumber, c_val, len, kCFStringEncodingUTF8))
             {
                 snprintf(usbDevice.SerialNumber, sizeof(usbDevice.SerialNumber), "%s", c_val);
@@ -364,7 +351,7 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
 
             free(c_val);
         }
-        CFRelease(serialnumber); // ADDED: Fix Memory Leak
+        CFRelease(serialnumber);
     }
 
     debug_print("\n");
@@ -372,16 +359,15 @@ void get_usb_device_info(io_service_t device, int newdev, WatcherContext* ctx)
     if (newdev)
     {
         if (ctx && ctx->InsertedCallback)
-            ctx->InsertedCallback(&usbDevice); // Pass by pointer
+            ctx->InsertedCallback(&usbDevice);
     }
     else
     {
         if (ctx && ctx->RemovedCallback)
-            ctx->RemovedCallback(&usbDevice); // Pass by pointer
+            ctx->RemovedCallback(&usbDevice);
     }
 }
 
-// CHANGED: Pass context through
 void iterate_usb_devices(io_iterator_t iterator, int newdev, WatcherContext* ctx)
 {
     io_service_t usbDevice;
@@ -393,22 +379,15 @@ void iterate_usb_devices(io_iterator_t iterator, int newdev, WatcherContext* ctx
     }
 }
 
-// CHANGED: Cast refcon to WatcherContext
 void usb_device_added(void* refcon, io_iterator_t iterator)
 {
     iterate_usb_devices(iterator, 1, (WatcherContext*)refcon);
 }
 
-// CHANGED: Cast refcon to WatcherContext
 void usb_device_removed(void* refcon, io_iterator_t iterator)
 {
     iterate_usb_devices(iterator, 0, (WatcherContext*)refcon);
 }
-
-// Global variable to hold the run loop source
-// CFRunLoopSourceRef stopRunLoopSource = NULL;
-//
-// CFRunLoopRef runLoop;
 
 // Callback function for the run loop source
 void stopRunLoopSourceCallback(void* info)
@@ -419,128 +398,6 @@ void stopRunLoopSourceCallback(void* info)
         CFRunLoopStop(ctx->runLoop);
     }
 }
-
-// Function to add the stop run loop source
-// void addStopRunLoopSource(void)
-// {
-//     // Create a custom context for the run loop source
-//     CFRunLoopSourceContext sourceContext = {
-//         .version = 0,
-//         .info = NULL,
-//         .retain = NULL,
-//         .release = NULL,
-//         .copyDescription = NULL,
-//         .equal = NULL,
-//         .hash = NULL,
-//         .schedule = NULL,
-//         .cancel = NULL,
-//         .perform = stopRunLoopSourceCallback
-//     };
-//
-//     // Create the run loop source
-//     stopRunLoopSource = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &sourceContext);
-//
-//     // Add the run loop source to the current run loop
-//     CFRunLoopAddSource(runLoop, stopRunLoopSource, kCFRunLoopDefaultMode);
-// }
-
-// Function to remove the stop run loop source
-// void removeStopRunLoopSource(void)
-// {
-//     if (stopRunLoopSource != NULL)
-//     {
-//         // Remove the run loop source from the current run loop
-//         CFRunLoopRemoveSource(runLoop, stopRunLoopSource, kCFRunLoopDefaultMode);
-//
-//         // Release the run loop source
-//         CFRelease(stopRunLoopSource);
-//         stopRunLoopSource = NULL;
-//     }
-// }
-
-// void init_notifier(void)
-// {
-//     notificationPort = IONotificationPortCreate(kIOMainPortDefault);
-//     CFRunLoopAddSource(runLoop, IONotificationPortGetRunLoopSource(notificationPort), kCFRunLoopDefaultMode);
-//
-//     debug_print("init_notifier ok\n");
-// }
-
-// https://sudonull.com/post/141779-Working-with-USB-devices-in-a-C-program-on-MacOS-X
-
-// If a function has Create or Copy in its name, you own the returned object and must CFRelease it when done.
-// Otherwise, you do not own it and must not release it. If you do, you will get CF_IS_OBJC exception.
-
-// void configure_and_start_notifier(void)
-// {
-//     debug_print("Starting notifier\n");
-//
-//     CFMutableDictionaryRef matchDictAdded = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
-//
-//     if (!matchDictAdded)
-//     {
-//         fprintf(stderr,
-//                 "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOMatchedNotification)\n");
-//         return;
-//     }
-//
-//     kern_return_t addResult;
-//
-//     io_iterator_t deviceAddedIter;
-//     addResult = IOServiceAddMatchingNotification(notificationPort, kIOMatchedNotification, matchDictAdded,
-//                                                  usb_device_added, NULL, &deviceAddedIter);
-//
-//     if (addResult != KERN_SUCCESS)
-//     {
-//         fprintf(stderr, "IOServiceAddMatchingNotification failed for kIOMatchedNotification\n");
-//         //CFRelease(matchDict); - CF_IS_OBJC exception
-//         return;
-//     }
-//
-//     usb_device_added(NULL, deviceAddedIter);
-//
-//     // CHANGED: Create a NEW dictionary for Removed events (DO NOT REUSE matchDict)
-//     CFMutableDictionaryRef matchDictRemoved = (CFMutableDictionaryRef)IOServiceMatching(kIOUSBDeviceClassName);
-//
-//     if (!matchDictRemoved)
-//     {
-//         fprintf(stderr,
-//                 "Failed to create matching dictionary for kIOUSBDeviceClassName (for kIOTerminatedNotification)\n");
-//         return;
-//     }
-//
-//     io_iterator_t deviceRemovedIter;
-//     addResult = IOServiceAddMatchingNotification(notificationPort, kIOTerminatedNotification, matchDictRemoved,
-//                                                  usb_device_removed, NULL, &deviceRemovedIter);
-//
-//     if (addResult != KERN_SUCCESS)
-//     {
-//         fprintf(stderr, "IOServiceAddMatchingNotification failed for kIOTerminatedNotification\n");
-//         //CFRelease(matchDict); - CF_IS_OBJC exception
-//         return;
-//     }
-//
-//     usb_device_removed(NULL, deviceRemovedIter);
-//
-//     // Add the stop run loop source
-//     addStopRunLoopSource();
-//
-//     // Start the run loop
-//     CFRunLoopRun();
-//
-//     // Remove the stop run loop source
-//     removeStopRunLoopSource();
-//
-//     //CFRelease(matchDict); - CF_IS_OBJC exception
-// }
-
-// void deinit_notifier(void)
-// {
-//     CFRunLoopRemoveSource(runLoop, IONotificationPortGetRunLoopSource(notificationPort), kCFRunLoopDefaultMode);
-//     IONotificationPortDestroy(notificationPort);
-//
-//     debug_print("deinit_notifier ok\n");
-// }
 
 void signal_handler(int signum)
 {
@@ -557,7 +414,7 @@ void init_signal_handler(void)
 }
 
 // ----------------------------------------------------------------------------------
-// NEW API IMPLEMENTATION
+// CONTEXT API IMPLEMENTATION
 // ----------------------------------------------------------------------------------
 
 void* CreateMacWatcherContext(UsbDeviceCallback insertedCallback, UsbDeviceCallback removedCallback)
@@ -653,9 +510,6 @@ void StopMacWatcher(void* ptr)
     }
 }
 
-// REMOVED: Old Init/Start/Stop functions as they are replaced by the Context aware ones above
-// init_notifier, configure_and_start_notifier, deinit_notifier, StartMacWatcher, StopMacWatcher...
-
 void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback)
 {
     if (!syspath)
@@ -720,7 +574,7 @@ void GetMacMountPoint(const char* syspath, MountPointCallback mountPointCallback
                         }
                         free(c_val);
                     }
-                    CFRelease(bsdName); // Fix Memory Leak
+                    CFRelease(bsdName);
                 }
 
                 match = 1;

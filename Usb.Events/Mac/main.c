@@ -4,17 +4,19 @@
 
 void OnInserted(UsbDeviceData usbDevice)
 {
-    printf("Inserted: %s \n", usbDevice.DeviceName);
+    printf("++ Inserted: %s \n", usbDevice.DeviceName);
 }
 
 void OnRemoved(UsbDeviceData usbDevice)
 {
-    printf("Removed: %s \n", usbDevice.DeviceName);
+    printf("-- Removed: %s \n", usbDevice.DeviceName);
 }
 
-void *StartWatcher(void *arg)
+void* ctx;
+
+void* StartWatcher(void* arg)
 {
-    StartMacWatcher(OnInserted, OnRemoved);
+    if (ctx) RunMacWatcher(ctx);
 
     pthread_exit(NULL);
 }
@@ -25,8 +27,10 @@ int main(void)
 
     printf("USB events: \n");
 
+    ctx = CreateMacWatcherContext(OnInserted, OnRemoved);
+
     int result = pthread_create(&thread, NULL, StartWatcher, NULL);
-    
+
     if (result != 0)
     {
         printf("Error creating the thread. Exiting program.\n");
@@ -35,9 +39,14 @@ int main(void)
 
     getchar();
 
-    StopMacWatcher();
+    if (ctx)
+    {
+        StopMacWatcher(ctx);
+    }
 
     pthread_join(thread, NULL);
+    
+    ReleaseMacWatcherContext(ctx);
 
     return 0;
 }
